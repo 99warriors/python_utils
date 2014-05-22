@@ -347,6 +347,14 @@ class DataIdIterable(object):
         raise NotImplementedError
 
 
+def split_list_like(l, num_blocks):
+    chunks = []
+    boundaries = map(int, np.linspace(0, len(l), num_blocks+1))[0:-1] + [len(l)]
+    for start, end in zip(boundaries[0:-1], boundaries[1:]):
+        chunks.append(l[start:end])
+    return chunks
+
+
 class negation_f(f):
 
     def __init__(self, orig):
@@ -570,7 +578,39 @@ def pystan_traces_to_list_of_dicts(traces):
                 else:
                     assert False
     return l
-    
+
+
+def plot_posterior_boxplots(traces):
+    figs = []
+    for key, val in traces.iteritems():
+        if len(val.shape) == 1:
+            fig, ax = plt.subplots()
+            ax.hist(val)
+            ax.set_title(key)
+        elif len(val.shape) == 2:
+            cols = [x for x in val.T]
+            fig, ax = plt.subplots()
+            ax.boxplot(cols)
+            dim = len(cols)
+            ax.set_xticks(range(1, dim+1))
+            ax.set_xticklabels(map(str, range(1, dim+1)), rotation = 'vertical')
+            ax.set_title(key)
+        else:
+            assert False
+        figs.append(fig)
+    return figs
+
+def plot_unnamed_traces(master):
+    """
+    for every variable, plot traces from all chains on same plot
+    """
+    figs = []
+    for v in itertools.izip(*[master[:,i,:].T for i in range(master.shape[1])]):
+        fig, ax = plt.subplots()
+        for c in v:
+            ax.plot(c)
+        figs.append(fig)
+    return figs
 
 class mixture_dist(object):
 
