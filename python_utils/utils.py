@@ -1,5 +1,5 @@
 #import python_utils.caching as caching
-import caching
+
 import python_utils.python_utils.decorators as decorators
 import numpy as np
 import functools
@@ -11,15 +11,52 @@ import math
 import itertools
 import string
 import time
+import sys
+import multiprocessing
+import types
+
 
 def get_callable_name(f):
-    import types
     if isinstance(f, functools.partial):
         return get_callable_name(f.func)
     elif isinstance(f, types.FunctionType):
         return f.__name__
     else:
-        return repr(f)
+        try:
+            return f.__class__.__name
+        except:
+            return repr(f)
+
+
+get_shallow_rep = get_callable_name
+
+
+def get_for_json(o):
+    """
+    first see if a rich representation is possible
+    """
+    if isinstance(o, functools.partial):
+        return [\
+            get_for_json(o.func),\
+                [get_for_json(a) for a in o.args],\
+#                {k: get_for_json(v) for (k, v) in o.keywords.iteritems() if k[0] != '_'}\
+                ]
+    try:
+        d = o.__dict__
+    except AttributeError:
+        return get_shallow_rep(o)
+    else:
+        return [\
+            get_shallow_rep(o),\
+                {k:get_for_json(v) for (k, v) in d.iteritems() if k[0] != '_'}\
+                ]
+
+
+def json_shortener(s):
+    def keep(line):
+        import re
+        return len(re.findall('[^\[\]\{\},]', line.strip())) > 0
+    return string.join(filter(keep, string.split(s, sep='\n')), sep='\n')
 
 
 def exception_catcher_decorator_helper(f, val, exception_tuple, *args, **kwargs):
@@ -27,6 +64,48 @@ def exception_catcher_decorator_helper(f, val, exception_tuple, *args, **kwargs)
         return f(*args, **kwargs)
     except exception_tuple:
         return val
+
+
+class log_output_fxn_decorator(decorators.fxn_decorator):
+    """
+    creates log folder, and names log file based on pid
+    """
+
+    def __init__(self, log_folder):
+        self.log_folder = log_folder
+        import os
+        if not os.path.exists(self.log_folder):
+            os.makedirs(self.log_folder)
+
+    def __call__(self, f):
+
+        @functools.wraps(f)
+        def wrapped_f(*args, **kwargs):
+            import os
+            log_file = '%s/%s' % (self.log_folder, str(os.getpid()))
+            print log_file, 'GGGGGGGGGGGGGGGGGGGGGGGGG'
+            #sys.stdout = open(log_file, 'w')
+            return f(*args, **kwargs)
+
+        return wrapped_f
+
+
+def call_with_logging(log_folder, f, arg):
+    import os
+    log_file = '%s/%s' % (log_folder, str(os.getpid()))
+    import sys
+    sys.stdout = open(log_file, 'w')
+    return f(arg)
+
+
+def logged_sync_map(log_folder, num_procs, f, iterable):
+#    return map(logged_f, iterable)
+    import os
+    if not os.path.exists(log_folder):
+        os.makedirs(log_folder)
+    pool = multiprocessing.Pool(num_procs)
+    return pool.map(functools.partial(call_with_logging, log_folder, f), iterable)
+
 
 
 class exception_catcher_fxn_decorator(decorators.fxn_decorator):
@@ -96,7 +175,7 @@ class raise_exception_method_decorator(decorators.method_decorator):
         self.which_exception = which_exception
 
     def __call__(self, f):
-        return raise_exception_decorated_method(f)
+        return raise_exception_decorated_method(f, self.which_exception)
 
 def timeit_decorator_helper(f, display_name, *args, **kwargs):
     start_time = time.time()
@@ -128,69 +207,6 @@ class timeit_method_decorator(decorators.method_decorator):
 
     def __call__(self, f):
         return timeit_decorated_method(f)
-
-
-@caching.default_read_fxn_decorator
-#@raise_exception_fxn_decorator()
-#@caching.default_write_fxn_decorator
-def google_get_lat_lng(address):
-    """
-    returns {'lat':lat,'lng':lng} given address string
-    """
-    raise Exception
-    max_attempts = 1
-    sleep_time = .01
-
-    import pdb
-
-    for i in range(max_attempts):
-        print 'attempt:', i
-        try:
-            import json, urllib
-            google_api_url = 'http://maps.googleapis.com/maps/api/geocode/json?'
-            full_url = google_api_url + urllib.urlencode({'address':address, 'sensor':'false'})
-            response = json.loads(urllib.urlopen(full_url).read())
-            lat_lng = response['results'][0]['geometry']['location']
-        except IndexError:
-            import time
-            time.sleep(sleep_time)
-        else:
-            #global count
-            count = count + 1
-            print 'count', count
-            return lat_lng
-    #global count
-    count = count + 1
-    print 'count', count
-    return np.nan
-
-latlng_count = 0
-
-#@timeit_fxn_decorator()
-@caching.default_cache_fxn_decorator
-@caching.default_read_fxn_decorator
-#@raise_exception_fxn_decorator(python_utils.exceptions.TooLazyToComputeException)
-@caching.default_write_fxn_decorator
-def get_lat_lng(address):
-    global latlng_count
-    print latlng_count
-    latlng_count += 1
-    import json, urllib
-    import crime_pattern.constants as constants
-    max_tries = 5
-    for attempt in xrange(max_tries):
-        try:
-            url = constants.mapquest_api_url + urllib.urlencode({'key':urllib.unquote(constants.mapquest_api_key), 'location':address})
-            print url
-            pdb.set_trace()
-            response = json.loads(urllib.urlopen(url).read())
-            latlng = response['results'][0]['locations'][0]['latLng']
-        except IndexError:
-            pass
-        else:
-            return latlng
-    raise python_utils.exceptions.TooLazyToComputeException
-
 
 
 def date_string_to_year(s):
@@ -572,6 +588,17 @@ def pystan_traces_to_list_of_dicts(traces):
     return l
     
 
+def merge_pystan_permuted_traces(traces):
+    """
+    
+    """
+    keys = iter(traces).next().keys()
+    merged = {}
+    for key in keys:
+        merged[key] = np.concatenate([trace[key] for trace in traces])
+    return merged
+
+
 class mixture_dist(object):
 
     def __init__(self, pi, dists):
@@ -776,13 +803,10 @@ class cycle_through_coord_iterative_step(object):
     def __init__(self):
         pass
 
-    def set_f(self, f):
-        self.f = f
-
-    def __call__(self, x):
+    def __call__(self, f, x, constraints):
         dim = len(x)
         for i in xrange(dim):
-            x[i] = self.f.coord_ascent(x, i)
+            x[i] = f.coord_ascent(x, i, constraints)
         return x
 
 
@@ -793,12 +817,16 @@ class get_initial_subset_x_random(object):
     def __init__(self, p, seed=0):
         self.p, self.seed = p, seed
 
-    def __call__(self, f):
+    def __call__(self, f, constraints):
         dims = f.x_dims
         ans = [np.array([i for i in xrange(dim) if np.random.uniform() < self.p]) for dim in dims]
-        for i, coord in enumerate(ans):
+        for (i, coord), constraint in zip(enumerate(ans), constraints):
             if len(coord) == 0:
                 ans[i] = np.array([0])
+            if constraint != None:
+                import random
+                ans[i] = random.sample(constraint, 1)[0]
+                #ans[i] = constraint[np.random.choice(range(len(constraint)))]
         return ans
                 
 
@@ -810,13 +838,13 @@ class iterative_argmax_F(unsupervised_F):
         self.get_initial_x, self.iterative_step = get_initial_x, iterative_step
         self.max_steps, self.tol = max_steps, tol
 
-    def __call__(self, f):
-        x = self.get_initial_x(f)
+    def __call__(self, f, constraints):
+        x = self.get_initial_x(f, constraints)
         f_x = f(x)
-        self.iterative_step.set_f(f)
+        #self.iterative_step.set_f(f)
         for i in xrange(self.max_steps):
             try:
-                x_new = self.iterative_step(x)
+                x_new = self.iterative_step(f, x, constraints)
             except StopIterativeException, e:
                 return e.val
             if f(x_new) - f_x > self.tol:
@@ -1054,6 +1082,24 @@ class latlng_grid_region_list(list):
                     assert False
         return idx
 
+    def coord_to_index(self, i, j):
+        return i * self.num_lng + j
+
+
+class grid_region_box_region_subset_F(F):
+
+    def __init__(self, max_region_width):
+        self.max_region_width = max_region_width
+
+    def __call__(self, regions):
+        """
+        assumes regions has a num_lat, num_lng, and coord_to_index method
+        """
+        # for each top left corner, add all allowable squares
+        return set([tuple([x for x in itertools.starmap(regions.coord_to_index, itertools.product(range(i, min(regions.num_lat, i + width)), range(j, min(regions.num_lng, j + width))))]) for i in range(regions.num_lat) for j in range(regions.num_lng) for width in range(1, self.max_region_width)])
+
+
+
 class singleton_location_regions_F(unsupervised_F):
 
     def __init__(self):
@@ -1149,6 +1195,7 @@ class scaled_dist_mat_F(F):
         self.metric = metric
 
     def train(self, X):
+        # FIX
         self.right_transform = np.diag(pd.DataFrame(X).apply(lambda s: 1.0 / (s.quantile(0.9) - s.quantile(0.1))))
 
     def __call__(self, X):
@@ -1166,6 +1213,7 @@ class scaled_scalar_dist_mat_F(F):
 
     def train(self, X):
         X_series = pd.Series(X)
+        # FIX
         self.scale = 1.0 / (X_series.quantile(0.9) - X_series.quantile(0.1))
 
 
@@ -1264,6 +1312,45 @@ def plot_data_feature_counts(data):
         fig.suptitle(counts.name)
         fig_axes.append((fig, ax))
     return fig_axes
+
+
+class parallel_map_with_callback(object):
+    """
+    calls asynchronous ipython map, then checks results to see if they have finished, and calls callback on results if so
+    """
+    def __init__(self, view):
+        self.view = view
+
+    def __call__(self, f, l, callback):
+        self.view.map(f, l)
+
+
+def map_reduce_f(mapper, map_f, reduce_f, iterable):
+    return reduce_f(mapper(map_f, iterable))
+
+
+def apply(x, f):
+    return f(x)
+
+
+def parallel_get_posterior_f(mapper, data, get_posterior_fs):
+    posteriors = mapper(functools.partial(apply, data), get_posterior_fs)
+    permuted, unpermuted = zip(*posteriors)
+    return merge_pystan_permuted_traces(permuted), list(itertools.chain(*unpermuted))
+
+
+class remapped_kwargs_f(object):
+    """
+    keyword_map maps new keywords to old keywords
+    """
+
+    def __init__(self, f, keyword_map):
+        self.f = f
+        self.keyword_map = keyword_map
+
+    def __call__(self, *args, **kwargs):
+        return self.f(*args, **dict([(self.keyword_map[key], val) for key in kwargs]))
+    
 
 
 #################
