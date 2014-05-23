@@ -603,7 +603,7 @@ def plot_posterior_boxplots(traces):
 
 def plot_unnamed_traces(master):
     """
-    for every variable, plot traces from all chains on same plot
+    for every variable, plot traces from all chains on same plotYES
     """
     figs = []
     for v in itertools.izip(*[master[:,i,:].T for i in range(master.shape[1])]):
