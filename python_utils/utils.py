@@ -624,7 +624,11 @@ def pystan_traces_to_list_of_dicts(traces):
 
 def merge_pystan_permuted_traces(traces):
     """
+<<<<<<< HEAD
     
+=======
+    for every variable, plot traces from all chains on same plotYES
+>>>>>>> origin
     """
     keys = iter(traces).next().keys()
     merged = {}
