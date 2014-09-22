@@ -40,8 +40,10 @@ def get_for_json(o):
         return [\
             get_for_json(o.func),\
                 [get_for_json(a) for a in o.args],\
-#                {k: get_for_json(v) for (k, v) in o.keywords.iteritems() if k[0] != '_'}\
+                {k: get_for_json(v) for (k, v) in o.keywords.iteritems() if k[0] != '_'}\
                 ]
+    if isinstance(o, list):
+        return [get_for_json(item) for item in o]
     try:
         d = o.__dict__
     except AttributeError:
@@ -247,6 +249,11 @@ def date_string_to_year(s):
     return int(string.split(string.split(s, sep=' ')[0], sep='/')[2])
 
 
+def split_list_like(l, num_chunks):
+    boundaries = map(int, np.linspace(0, len(l), num_chunks + 1))
+    return [l[lower:upper] for (lower, upper) in itertools.izip(boundaries[0:-1], boundaries[1:])]
+
+
 def display_text(s, heading='h2'):
     from IPython.display import display_html
     display_html('<%s>%s</%s>' % (heading, s, heading), raw=True)
@@ -268,6 +275,18 @@ def plot_bar_chart(ax, labels, values, offset = 0, width = 0.75, label = None, a
     ax.set_xticks(np.arange(num) + 1.0/2)
     ax.set_xticklabels(labels, rotation=90)
     ax.set_xlim((0, num))
+
+
+def plot_multi_bar_chart(ax, labels, cat_labels, valuess, colors, width = 0.75, alpha = 0.5):
+    num = len(labels)
+    num_cats = len(valuess)
+    for (cat_label, values, offset, color) in itertools.izip(cat_labels, valuess, np.linspace(0, width, num_cats+1), colors):
+        ax.bar(np.arange(num)+offset, values, label = cat_label, alpha = alpha, color = color, width = width/num_cats)
+    ax.set_xticks(np.arange(num) + 1.0/2)
+    ax.set_xticklabels(labels, rotation=90)
+    ax.set_xlim((0, num))
+
+
 
 
 def print_decorator(f):
@@ -311,6 +330,69 @@ class f(object):
     def __cmp__(self, other):
         return cmp(repr(self), repr(other))
 
+class f_with_custom_repr(f):
+
+    def __init__(self, f, name):
+        self.backing_f, self.name = f, name
+
+    def __call__(self, *args, **kwargs):
+        return self.backing_f(*args, **kwargs)
+
+    def __repr__(self):
+        return self.name
+
+class F(object):
+    """
+    what could F be?
+    - a regression function, F(x), so that __call__ returns F(x) or [F(x) for x in xs]
+    - a function that returns another function (ie an estimator) so that, g = F(data).  example would be density estimation
+    """
+
+#    def get_cache_arg_repr(self, *args, **kwargs):
+#        raise NotImplementedError
+
+    def get_cache_self_repr(self):
+        return '%s_%s' % (self.get_cache_self_name_repr(), self.get_cache_self_attr_repr())
+
+#    def get_cache_self_attr_repr(self):
+#        raise NotImplementedError
+
+    def get_cache_self_name_repr(self):
+        return self.__class__.__name__
+
+    def get_cache_key(self, *args, **kwargs):
+        return '%s_%s' % (self.get_cache_self_repr(), self.get_cache_arg_repr(*args, **kwargs))
+
+    def get_cache_path(self, *args, **kwargs):
+        return '%s/%s' % (self.get_cache_folder(*args, **kwargs), self.get_cache_key(*args, **kwargs))
+
+    def get_cache_folder(self, *args, **kwargs):
+        import python_utils.python_utils.caching as caching
+        return '%s/custom/%s' % (caching.cache_folder, self.__class__.__name__)
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def train(self, train_data):
+        raise NotImplementedError
+
+    def to_uninformative(self, uninformative, informative):
+        return uninformative
+
+    def to_informative(self, uninformative, informative):
+        return informative
+
+    def __call__(self, *args, **kwargs):
+        return self.to_uninformative(*self.call_informative(*args, **kwargs))
+        try:
+            return self.to_uninformative(*self.call_informative(*args, **kwargs))
+        except AttributeError:
+            print self.__class__.__name__
+            raise NotImplementedError
+
+    def uninformative_informative(self, *args, **kwargs):
+        raw = self.call_informative(*args, **kwargs)
+        return self.to_uninformative(*raw), self.to_informative(*raw)
 
 class multiple_composed_f(f):
 
@@ -327,13 +409,13 @@ class multiple_composed_f(f):
         return ans
 
 
-class composed_f(f):
+class composed_f(F):
 
     def __init__(self, f, g, unpack=False):
         self.f, self.g, self.unpack = f, g, unpack
     
     def __repr__(self):
-        return 'compose(%s,%s)' % (get_callable_name(f), get_callable_name(g))
+        return 'compose(%s,%s)' % (get_callable_name(self.f), get_callable_name(self.g))
 
     def __call__(self, *args, **kwargs):
         if self.unpack:
@@ -432,8 +514,13 @@ class contains_f(f):
     def __init__(self, f, val):
         self.f, self.val = f, val
 
-    def __call__(self, data_id):
-        return self.f(data_id) in self.val
+    def __call__(self, *args, **kwargs):
+#        return self.f(data_id) in self.val
+        try:
+            return int(self.f(*args, **kwargs) in self.val)
+        except Exception, e:
+            print e
+            return int(False)
 
 
 class categorical_f(f):
@@ -449,6 +536,9 @@ class categorical_f(f):
     def __repr__(self):
         return '%s_%s' % (repr(self.f), string.join([repr(bin) for bin in self.bins], sep='_'))
 
+    def __len__(self):
+        return len(self._contains_fs)
+
     @property
     def bins(self):
         return self._bins
@@ -457,12 +547,13 @@ class categorical_f(f):
     def contains_fs(self):
         return self._contains_fs
 
-    def __call__(self, data_id):
+    def __call__(self, *args, **kwargs):
         #print [repr(contains_f) for contains_f in self._contains_fs]
         #print pd.Series({repr(contains_f):contains_f(data_id) for contains_f in self._contains_fs})
         #print {repr(contains_f):contains_f(data_id) for contains_f in self._contains_fs}
         #pdb.set_trace()
-        return pd.Series({repr(contains_f):contains_f(data_id) for contains_f in self._contains_fs})
+        ans = pd.Series({repr(contains_f):contains_f(*args, **kwargs) for contains_f in self._contains_fs})
+        return ans
 
 
 class mapping(object):
@@ -506,8 +597,13 @@ class int_f_from_categorical_f(f, bijective_mapping):
     returns the coordinate that has a 1
     also defines 1-to-1 mapping from contains_fs (which have string representation) to integers
     """
-    def __init__(self, _categorical_f):
+    def __init__(self, _categorical_f, offset=0):
         self.categorical_f = _categorical_f
+        self.offset = offset
+
+    @property
+    def bins(self):
+        return self.categorical_f.bins
 
     def __repr__(self):
         return 'int_f_%s' % repr(self.categorical_f)
@@ -518,15 +614,14 @@ class int_f_from_categorical_f(f, bijective_mapping):
     def f_inv(self, index):
         return self.categorical_f.contains_fs[index]
 
-    def __call__(self, data_id):
-        v = self.categorical_f(data_id)
+    def __call__(self, *args, **kwargs):
+        v = self.categorical_f(*args, **kwargs)
         nonzeros = np.nonzero(v)[0]
         try:
             assert len(nonzeros) == 1
         except AssertionError:
             import pdb
-
-        return nonzeros[0]
+        return nonzeros[0] + self.offset
 
 
 class feature(object):
@@ -665,6 +760,10 @@ def merge_pystan_permuted_traces(traces):
     return merged
 
 
+def merge_pystan_unpermuted_traces(traces):
+    return np.concatenate(traces, axis=1)
+
+
 class mixture_dist(object):
 
     def __init__(self, pi, dists):
@@ -705,20 +804,8 @@ def plot_trace(l, title=None):
     return fig
 
 
-class F(object):
-    """
-    what could F be?
-    - a regression function, F(x), so that __call__ returns F(x) or [F(x) for x in xs]
-    - a function that returns another function (ie an estimator) so that, g = F(data).  example would be density estimation
-    """
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError
 
-    def train(self, train_data):
-        raise NotImplementedError
 
-    def __call__(self, test_data):
-        raise NotImplementedError
 
 
 class unsupervised_F(F):
@@ -758,6 +845,61 @@ class kd_helper_F(F):
     def __call__(self, point):
         return self.kde.score(point)
 
+
+class rate_f(object):
+
+    def __init__(self, kde, num_events, time_bin):
+        self.kde, self.num_events, self.time_bin = kde, num_events, time_bin
+
+    def __call__(self, t):
+        assert t in self.time_bin
+        return np.exp(self.kde.score([t])) * float(self.num_events)
+
+
+class zero_rate_f(object):
+
+    def __init__(self, time_bin):
+        self.time_bin = time_bin
+
+    def __call__(self, t):
+        assert t in self.time_bin
+        return 0.0
+
+
+def get_intensity_estimate(l, bandwidth, kernel, metric):
+    """
+    get a intensity estimate for every data.
+    l should be list of (event times, time_bin) tuples
+    """
+    print len(l)
+    event_times_list, time_bins = zip(*l)
+    from sklearn.neighbors.kde import KernelDensity
+    intensity_fxns = []
+
+    for (event_times, time_bin) in itertools.izip(event_times_list, time_bins):
+        if len(event_times) > 0:
+            kde = KernelDensity(kernel=kernel, bandwidth=bandwidth, metric=metric).fit([[event_time] for event_time in event_times])
+            intensity_fxns.append(rate_f(kde, len(event_times), time_bin))
+        else:
+            intensity_fxns.append(zero_rate_f(time_bin))
+
+    
+    def the_f(t):
+#        if t < 0:
+#            pdb.set_trace()
+        from scipy.stats import bayes_mvs
+        ans = [f(t) for f in intensity_fxns if t in f.time_bin]
+#        if t < 0:
+#            pdb.set_trace()
+        try:
+            mean_cntr, var_cntr, std_cntr = bayes_mvs(ans)
+        except:
+            return (None, (None, None))
+        return mean_cntr
+        return np.mean(ans)
+
+    return the_f
+            
 
 class categorical_joint_distribution_F(F):
     """
@@ -870,9 +1012,19 @@ class cycle_through_coord_iterative_step(object):
         pass
 
     def __call__(self, f, x, constraints):
+        import copy
+        x = copy.deepcopy(x)
         dim = len(x)
         for i in xrange(dim):
-            x[i] = f.coord_ascent(x, i, constraints)
+            old = f(x)
+            old_coord = x[i]
+            new_coord = f.coord_ascent(x, i, constraints)
+            x[i] = new_coord
+            new = f(x)
+            if new - old < -.0001:
+                print 'was lower'
+                print new, old, new_coord, old_coord, i
+                x[i] = old_coord
         return x
 
 
@@ -884,13 +1036,13 @@ class get_initial_subset_x_random(object):
         self.p, self.seed = p, seed
 
     def __call__(self, f, constraints):
+        import random
         dims = f.x_dims
-        ans = [np.array([i for i in xrange(dim) if np.random.uniform() < self.p]) for dim in dims]
+        ans = [set([i for i in xrange(dim) if random.random() < self.p]) for dim in dims]
         for (i, coord), constraint in zip(enumerate(ans), constraints):
             if len(coord) == 0:
-                ans[i] = np.array([0])
+                ans[i] = set([0])
             if constraint != None:
-                import random
                 ans[i] = random.sample(constraint, 1)[0]
                 #ans[i] = constraint[np.random.choice(range(len(constraint)))]
         return ans
@@ -904,20 +1056,51 @@ class iterative_argmax_F(unsupervised_F):
         self.get_initial_x, self.iterative_step = get_initial_x, iterative_step
         self.max_steps, self.tol = max_steps, tol
 
-    def __call__(self, f, constraints):
+    def call_informative(self, f, constraints):
         x = self.get_initial_x(f, constraints)
+        x_0 = x
+        #print x_0
         f_x = f(x)
         #self.iterative_step.set_f(f)
         for i in xrange(self.max_steps):
             try:
                 x_new = self.iterative_step(f, x, constraints)
             except StopIterativeException, e:
-                return e.val
-            if f(x_new) - f_x > self.tol:
-                return x_new
+                assert False
+                return (e.val, f(e.val)), (x_0, i)
+            f_x_new = f(x_new)
+#            try:
+#                assert f_x_new > (f_x - .0001)
+#            except AssertionError:
+#                print f_x_new, f_x
+#                pdb.set_trace()
+            if f_x_new - f_x < self.tol:
+                return (x_new, f_x_new), (x_0, x_new, i, f_x_new, f_x)
             x = x_new
-            f_x = f(x)
-        return x
+            f_x = f_x_new
+        return (x, f_x), (x_0, x_new, f_x, f_x_new, i)
+
+
+class multiple_try_argmax_F(unsupervised_F):
+
+    def __init__(self, horse_F, num):
+        self.horse_F, self.num = horse_F, num
+
+    def get_max_try(self, informative_results):
+        return np.argmax([informative_result[3] for informative_result in informative_results])
+
+    def get_avg_steps(self, informative_results):
+        return np.mean([informative_result[4] for informative_result in informative_results])
+
+    def call_informative(self, f, constraints):
+        uninformative_results, informative_results= [], []
+        for i in range(self.num):
+            uninformative, informative = self.horse_F.uninformative_informative(f, constraints)
+            uninformative_results.append(uninformative)
+            informative_results.append(informative)
+        return max(uninformative_results, key = lambda (x, f_x): f_x), informative_results
+#        return max([self.horse_F.to_uninformative(*x) for x in results], key = lambda (x, f_x): f_x), informative_results
+
 
 def ndarray_subset(x, subsets):
     #y = x.copy()
@@ -951,13 +1134,17 @@ class bin(object):
     def __len__(self):
         raise NotImplementedError
 
+    def __eq__(self, other):
+        return repr(self).__eq__(repr(other))
+
     def point_rep(self):
         raise NotImplementedError
 
-    def __iter__(self):
-        raise NotImplementedError
+#    def __iter__(self):
+#        raise NotImplementedError
 
     def __repr__(self):
+        return 'BIN'
         raise NotImplementedError
 
 
@@ -970,7 +1157,7 @@ class equals_bin(bin):
         self.val = val
 
     def __contains__(self, item):
-        #print self.val, item, item == self.val
+#        print self.val, item, item == self.val, 'asdf'
         return item == self.val
 
     def __len__(self):
@@ -1000,6 +1187,12 @@ class everything_bin(bin):
 
 class range_bin(bin):
 
+    def __cmp__(self, other):
+        return cmp(self.low, other.low)
+
+    def __str__(self):
+        return self.__repr__()
+
     def __repr__(self):
         return 'range_%s_%s' % (repr(self.low), repr(self.high))
 
@@ -1013,7 +1206,16 @@ class range_bin(bin):
         return self.low
 
     def __contains__(self, other):
-        return other < self.high and other >= self.low
+        if self.high == None:
+            low_enough = True
+        else:
+            low_enough = other < self.high
+        if self.low == None:
+            high_enough - True
+        else:
+            high_enough = other >= self.low
+        return low_enough and high_enough
+
 
 
 class contains_bin(bin):
@@ -1051,6 +1253,22 @@ class product_bin(bin):
     def point_rep(self):
         return tuple([coord_bin.point_rep() for coord_bin in self.coord_bins])
 
+
+class custom_bin(bin):
+
+    def __init__(self, custom_f):
+        self.custom_f = custom_f
+
+    def __contains__(self, v):
+        return self.custom_f(v)
+
+    def __repr__(self):
+        return 'custom'
+
+    def point_rep(self):
+        raise NotImplementedError
+
+
 class region(bin):
 
     def point_rep(self):
@@ -1060,27 +1278,66 @@ class region(bin):
         raise NotImplementedError
 
 
+from scipy.spatial import kdtree
+
+# patch module-level attribute to enable pickle to work
+kdtree.node = kdtree.KDTree.node
+kdtree.leafnode = kdtree.KDTree.leafnode
+kdtree.innernode = kdtree.KDTree.innernode
+
+
+
 class voronoi_region(region):
     """
     the voronoi region of a point with respect to a set of points
     """
-    def __init__(self, coord, kdtree):
-        self.coord, self.kdtree = coord, kdtree
+    def __init__(self, coord, parent_list):
+        self.coord, self.parent_list = coord, parent_list
 
     def point_rep(self):
         return self.coord
 
     def __contains__(self, coord):
-        return self.kdtree.data[self.kdtree.query(coord)[1]] == coord
+        return tuple(self.parent_list.kdtree.data[self.parent_list.kdtree.query(coord)[1]]) == coord
 
     def __hash__(self):
         return hash(self.coord)
+
+    def plot(self, ax):
+        """
+        plots the candidate xys that are in the region
+        """
+        for latlng in self.parent_list.plot_latlngs:
+            if latlng_to_xy(*latlng) in self:
+                xy = latlng_to_xy(*latlng)
+                ax.scatter([xy[0]], [xy[1]], marker = '.', color = 'y')
+        return ax
 
 class NoRegionException(Exception):
     pass
 
 
-class simple_region_list(list):
+class region_list(list):
+
+    def __init__(self, l, region_subsets = None):
+        if region_subsets != None:
+            self.region_subsets = region_subsets
+        list.__init__(self, l)
+
+    @property
+    def is_constrained(self):
+        try:
+            asdf = self.region_subsets_F
+        except AttributeError:
+            return False
+        else:
+            return True
+
+    def get_allowable_subsets(self, latlngs):
+        return self.region_subsets_F(self, latlngs)
+
+
+class simple_region_list(region_list):
 
     def point_to_region_index(self, point):
         for i, region in enumerate(self):
@@ -1089,17 +1346,74 @@ class simple_region_list(list):
         raise NoRegionException
         
 
-class voronoi_region_list(list):
+class disjoint_region_list(region_list):
 
-    def __init__(self, voronoi_points):
-        from scipy.spatial import KDTree
+    def point_to_region_indicies(self, latlng):
+        return set([self.point_to_region_index(latlng)])
+
+
+class compound_region_list(list):
+    """
+    takes in region_lists that consist of (disjoint) regions
+    
+    """
+    def __init__(self, region_lists):
+        self.region_lists = region_lists
+        list.__init__(self, list(itertools.chain(*region_lists)))
+
+    def is_constrained(self):
+        if all([region.is_constrained for region in self.region_lists]):
+            return True
+        if all([not region.is_constrained for region in self.region_lists]):
+            return False
+        return False
+
+    def get_allowable_subsets(self, latlngs):
+        offset = 0
+        ans = []
+        for region_list in self.region_lists:
+            allowable_subsets = region_list.get_allowable_subsets(latlngs)
+            shifted_allowable_subsets = [set([idx + offset for idx in allowable_subset]) for allowable_subset in allowable_subsets]
+            ans = ans + shifted_allowable_subsets
+            offset = offset + len(region_list)
+        return ans
+
+    def point_to_region_indicies(self, latlng):
+        offset = 0
+        ans = set()
+        for region_list in self.region_lists:
+            try:
+                for idx in region_list.point_to_region_indicies(latlng):
+                    actual_idx = offset + idx
+                    assert actual_idx not in ans
+                    assert actual_idx < len(self)
+                    ans.add(actual_idx)
+            except NoRegionException:
+                pass
+            offset = offset + len(region_list)
+        return ans
+
+
+class voronoi_region_list(disjoint_region_list):
+    """
+    assumes all inputs are latlngs.  plot_latlng is in latlng, NOT xy
+    """
+    def __init__(self, voronoi_latlngs, plot_latlngs):
+        from scipy.spatial import KDTree, Voronoi
+        voronoi_points = [latlng_to_xy(*latlng) for latlng in voronoi_latlngs]
         self.kdtree = KDTree(voronoi_points)
-        voronoi_regions = [voronoi_region(point, self.kdtree) for point in voronoi_points]
+        self.voronoi = Voronoi(voronoi_points)
+        self.plot_latlngs = plot_latlngs
+        voronoi_regions = [voronoi_region(point, self) for point in voronoi_points]
         list.__init__(self, voronoi_regions)
 
-    def point_to_region_index(self, point):
-        return self.kdtree.query(point)[1]
+    def point_to_region_index(self, latlng):
+        return self.kdtree.query(latlng_to_xy(*latlng))[1]
 
+    def plot(self, ax):
+        from scipy.spatial import voronoi_plot_2d
+        voronoi_plot_2d(self.voronoi, ax)
+        return ax
 
 def latlng_to_xy(lat, lng):
     return lng, lat
@@ -1120,14 +1434,16 @@ class latlng_grid_region(product_bin):
         ax.plot([topleft_x, topright_x, bottomright_x, bottomleft_x, topleft_x], [topleft_y, topright_y, bottomright_y, bottomleft_y, topleft_y], color = 'blue')
         return ax
 
-class latlng_grid_region_list(list):
+class latlng_grid_region_list(disjoint_region_list):
 
-    def __init__(self, num_lat, num_lng, lat_min, lat_max, lng_min, lng_max):
+    def __init__(self, num_lat, num_lng, lat_min, lat_max, lng_min, lng_max, region_subsets_F = None):
         self.num_lat, self.num_lng = num_lat, num_lng
         self.lat_min, self.lat_max, self.lng_min, self.lng_max = lat_min, lat_max, lng_min, lng_max
         lat_boundaries = np.linspace(self.lat_min, self.lat_max, self.num_lat + 1)
         lng_boundaries = np.linspace(self.lng_min, self.lng_max, self.num_lng + 1)
         regions = [latlng_grid_region(lat_low, lat_high, lng_low, lng_high) for ((lat_low, lat_high), (lng_low, lng_high)) in itertools.product(itertools.izip(lat_boundaries[0:-1], lat_boundaries[1:]), itertools.izip(lng_boundaries[0:-1], lng_boundaries[1:]))]
+        if region_subsets_F != None:
+            self.region_subsets_F = region_subsets_F
         list.__init__(self, regions)
 
     def point_to_region_index(self, latlng):
@@ -1153,20 +1469,62 @@ class latlng_grid_region_list(list):
 
 
 class grid_region_box_region_subset_F(F):
+    """
+    takes in region_list, returns list of (set of indicies of regions)
+    """
+    def __init__(self, max_region_width, min_subset_count):
+        self.max_region_width, self.min_subset_count = max_region_width, min_subset_count
 
-    def __init__(self, max_region_width):
-        self.max_region_width = max_region_width
+    def get_cache_self_attr_repr(self):
+        return '%d_%d' % (self.max_region_width, self.min_subset_count)
 
-    def __call__(self, regions):
+    def __call__(self, regions, latlngs):
         """
         assumes regions has a num_lat, num_lng, and coord_to_index method
         """
+        # 
+        counts = np.zeros(len(latlngs))
+        for latlng in latlngs:
+            try:
+                for idx in regions.point_to_region_indicies(latlng):
+                    counts[idx] += 1
+            except NoRegionException:
+                pass
+        
         # for each top left corner, add all allowable squares
-        return set([tuple([x for x in itertools.starmap(regions.coord_to_index, itertools.product(range(i, min(regions.num_lat, i + width)), range(j, min(regions.num_lng, j + width))))]) for i in range(regions.num_lat) for j in range(regions.num_lng) for width in range(1, self.max_region_width)])
+        unfiltered = [tuple([x for x in itertools.starmap(regions.coord_to_index, itertools.product(range(i, min(regions.num_lat, i + lat_width)), range(j, min(regions.num_lng, j + lng_width))))]) for i in range(regions.num_lat) for j in range(regions.num_lng) for lat_width in range(1, self.max_region_width+1) for lng_width in range(1, self.max_region_width+1)]
+        ans_list = [s for s in unfiltered if sum([counts[z] for z in s]) > self.min_subset_count]
+        ans_set = set(ans_list)
+        return ans_set
 
 
+class singleton_region_subset_F(F):
 
-class singleton_location_regions_F(unsupervised_F):
+    def get_cache_self_attr_repr(self):
+        return 'single'
+
+    def __init__(self):
+        pass
+
+    def __call__(self, regions, latlngs):
+        return [set([i]) for i in range(len(regions))]
+
+
+class regions_F(unsupervised_F):
+
+    def get_cache_arg_repr(self, locations):
+        return '%d' % len(locations)
+
+    @property
+    def returns_constrained(self):
+        try:
+            asdf = self.region_subsets_F
+        except AttributeError:
+            return False
+        else:
+            return True
+
+class singleton_location_regions_F(regions_F):
 
     def __init__(self):
         pass
@@ -1175,25 +1533,122 @@ class singleton_location_regions_F(unsupervised_F):
         return simple_region_list([utils.equals_bin(location) for location in locations])
 
 
-class latlng_grid_regions_F(unsupervised_F):
+class latlng_grid_regions_F(regions_F):
 
-    def __init__(self, num_lat, num_lng):
-        self.num_lat, self.num_lng = num_lat, num_lng
+    def __init__(self, num_lat, num_lng, lat_is_midpoint, lng_is_midpoint, region_subsets_F = None):
+        self.num_lat, self.num_lng, self.lat_is_midpoint, self.lng_is_midpoint = num_lat, num_lng, lat_is_midpoint, lng_is_midpoint
+        if region_subsets_F != None:
+            self.region_subsets_F = region_subsets_F
+
+    def get_cache_self_attr_repr(self):
+        try:
+            asdf = self.region_subsets_F
+        except AttributeError:
+            return '%d_%d_%d_%d' % (self.num_lat, self.num_lng, self.lat_is_midpoint, self.lng_is_midpoint)
+        else:
+            return '%d_%d_%d_%d_%s' % (self.num_lat, self.num_lng, self.lat_is_midpoint, self.lng_is_midpoint, self.region_subsets_F.get_cache_self_repr())
 
     def __call__(self, locations):
         """
         locations are (lat,lng) tuples.  this one ignores actual locations though
         """
-        lat_min = np.percentile([location[0] for location in locations], 5)
-        lat_max = np.percentile([location[0] for location in locations], 95)
-        lng_min = np.percentile([location[1] for location in locations], 5)
-        lng_max = np.percentile([location[1] for location in locations], 95)
-        return latlng_grid_region_list(self.num_lat, self.num_lng, lat_min, lat_max, lng_min, lng_max)
+        lat_min = np.percentile([location[0] for location in locations], 0)
+        lat_max = np.percentile([location[0] for location in locations], 100)
+        lng_min = np.percentile([location[1] for location in locations], 0)
+        lng_max = np.percentile([location[1] for location in locations], 100)
+
+        lat_spacing = (lat_max - lat_min) / self.num_lat
+        lng_spacing = (lng_max - lng_min) / self.num_lng
+
+        if self.lat_is_midpoint:
+            lat_shift = -0.5
+        else:
+            lat_shift = 0.0
+        if self.lng_is_midpoint:
+            lng_shift = -0.5
+        else:
+            lng_shift = 0.0
+            
+
+        lat_min, lat_max = lat_min + (lat_shift * lat_spacing), lat_max + (lat_shift * lat_spacing)
+        lng_min, lng_max = lng_min + (lng_shift * lng_spacing), lng_max + (lng_shift * lng_spacing)
+
+        num_lat, num_lng = self.num_lat, self.num_lng
+
+        if self.lat_is_midpoint:
+            lat_max = lat_max + 0.5 * lat_spacing
+            num_lat += 1
+
+        if self.lng_is_midpoint:
+            lng_max = lng_max + 0.5 * lng_spacing
+            num_lng += 1
+
+        #print 'lat', lat_min, lat_max
+        #print 'lng', lng_min, lng_max
+
+        import crime_data.constants as crime_data_constants
+        lat_min = crime_data_constants.grid_min_lat
+        lat_max = crime_data_constants.grid_max_lat
+        lng_min = crime_data_constants.grid_min_lng
+        lng_max = crime_data_constants.grid_max_lng
+
+        if self.returns_constrained:
+            return latlng_grid_region_list(num_lat, num_lng, lat_min, lat_max, lng_min, lng_max, self.region_subsets_F)
+        else:
+            return latlng_grid_region_list(num_lat, num_lng, lat_min, lat_max, lng_min, lng_max)
         lat_boundaries = np.linspace(self.lat_min, self.lat_max, self.num_lat)
         lng_boundaries = np.linspace(self.lng_min, self.lng_max, self.num_lng)
         regions = [product_bin(range_bin(lat_low, lat_high), range_bin(lng_low, lng_high)) for ((lat_low, lat_high), (lng_low, lng_high)) in itertools.product(itertools.izip(lat_boundaries[0:-1], lat_boundaries[1:]), itertools.izip(lng_boundaries[0:-1], lng_boundaries[1:]))]
         # TODO simple_region_list is not efficient.  could probably use different container
-        return simple_region_list(regions)
+
+
+
+class voronoi_regions_F(regions_F):
+
+    def get_cache_self_attr_repr(self):
+        return '%.3f_%d' % (self.frac, self.seed)
+
+    def __init__(self, frac, seed, region_subsets_F = None):
+        self.frac = frac
+        self.seed = seed
+        if region_subsets_F != None:
+            self.region_subsets_F = region_subsets_F
+
+    def __call__(self, latlngs):
+        """
+        assumes 
+        choose random subset of locations to be the voronoi points
+        """
+        locs = range(len(latlngs))
+        np.random.RandomState(seed=self.seed).shuffle(locs)
+        voronoi_latlngs = [latlngs[i] for i in locs[0:int(self.frac * len(latlngs))]]
+        plot_latlngs = latlngs
+        if self.returns_constrained:
+            return voronoi_region_list(voronoi_latlngs, plot_latlngs, self.region_subset_F)
+
+
+class compound_regions_F(unsupervised_F):
+
+    def get_cache_self_attr_repr(self):
+        import string
+        return string.join([F.get_cache_self_attr_repr() for F in self.regions_F_list], sep = '_')
+
+    def __init__(self, regions_F_list):
+        self.regions_F_list = regions_F_list
+
+    def __call__(self, latlngs):
+        return compound_region_list([regions_F(latlngs) for regions_F in self.regions_F_list])
+
+    @property
+    def returns_constrained(self):
+        """
+        true if all the regions_F returns_constrained
+        """
+        if all([regions_F.returns_constrained for regions_F in self.regions_F_list]):
+            return True
+        if all([not regions_F.returns_constrained for regions_F in self.regions_F_list]):
+            return False
+        assert False
 
 
 class performance_f(object):
@@ -1315,18 +1770,144 @@ def get_fpr_tpr(retrieved_set, relevant_set, total_set):
     tpr = float(len(retrieved_set.intersection(relevant_set))) / len(relevant_set)
     return fpr, tpr
 
+
+class roc_area_F(F):
+
+    def __init__(self, end_fn_rate):
+        self.end_fn_rate = end_fn_rate
+
+    def __call__(self, truths, scores):
+        from sklearn.metrics import roc_curve
+        from sklearn.metrics import auc
+        fpr, tpr, thresholds = roc_curve(truths, scores)
+
+        import numpy
+        def get_roc_area(end):
+            xs, ys = zip(*[(x, y) for (x, y) in zip(fpr, tpr) if x < end])
+            return numpy.trapz(ys, xs)
+
+        return get_roc_area(self.end_fn_rate)
+
+
 def get_roc_curve_fig(truths, scores):
     fig, ax = plt.subplots()
     from sklearn.metrics import roc_curve
     from sklearn.metrics import auc
     fpr, tpr, thresholds = roc_curve(truths, scores)
+    import numpy
+
+    ends = [0.05, 0.10, 0.15, 0.20]
+
+    def get_roc_area(end):
+        xs, ys = zip(*[(x, y) for (x, y) in zip(fpr, tpr) if x < end])
+        return numpy.trapz(ys, xs)
+
+    areas = [get_roc_area(_end) for _end in ends]
+
+    import string
+    auroc_string = string.join(['%.3f, %.3f' % (end, area) for (end, area) in zip(ends, areas)], sep = ' ')
+
     auc_value = auc(fpr, tpr)
     ax.plot(fpr, tpr)
-    ax.set_title('auc: %.2f' % auc_value)
+    ax.set_title('aucs: %s' % auroc_string)
     ax.set_xlabel('fpr')
     ax.set_ylabel('tpr')
     fig.suptitle('roc curve')
+    fig.tight_layout()
     return fig, ax
+
+
+
+def get_roc_curve_fig_with_cutoff(ax, truths, scores, cutoff, label, color = 'b'):
+
+    from sklearn.metrics import roc_curve
+    from sklearn.metrics import auc
+    fpr, tpr, thresholds = roc_curve(truths, scores)
+    import numpy
+
+
+
+    def get_roc_area(end):
+        xs, ys = zip(*[(x, y) for (x, y) in zip(fpr, tpr) if x < end])
+        return numpy.trapz(ys, xs)
+
+    area = get_roc_area(cutoff)
+
+
+    auc_value = auc(fpr, tpr)
+    ax.plot(fpr, tpr, label = label, color = color)
+#    ax.set_title('aucs %.3f' % area)
+    ax.set_xlabel('fpr')
+    ax.set_ylabel('tpr')
+    #fig.suptitle('roc curve')
+    #fig.tight_layout()
+    return ax
+
+
+
+class my_partial(object):
+
+    def __init__(self, f, args):
+        self.f, self.args = f, args
+
+    def __call__(self, x):
+        return self.f(*(self.args + [x]))
+
+def apply_to_data(data, f):
+    import random
+    random.seed(0)
+    print 'F_INFO'
+    import python_utils.python_utils.utils as utils
+    import json
+    print utils.json_shortener(json.dumps(utils.get_for_json(f), indent=4))
+    try:
+        return (f(data), f)
+    except Exception, e:
+        print 'NO RESULTS FOR THIS', e
+        import sys
+        sys.stdout.flush()
+        return ((None, None), f)
+
+
+def get_multiple_roc_curve_figs(score_Fs, data, labels = None, mapper = map):
+    """
+    for given list of functions that return the input to roc_curve
+    """
+    if labels == None:
+        labels = map(str, range(len(score_Fs)))
+
+    fig, ax = plt.subplots()
+#    markers = ['None', 'o', '<', 's', '+']
+    markers = ['None', ',', ',']
+    linestyles = ['-', '--']
+    colors = ['b','g','r','c','m','y','k']
+    import itertools
+    import functools
+    truths_and_scores_and_Fs = mapper(functools.partial(apply_to_data, data), score_Fs)
+
+
+    for (truth_and_scores, F), label, (marker, linestyle, color) in zip(truths_and_scores_and_Fs, labels, itertools.product(markers, linestyles, colors)):
+        truths, scores = truth_and_scores
+        if truths != None:
+            from sklearn.metrics import roc_curve
+            from sklearn.metrics import auc
+            fpr, tpr, thresholds = roc_curve(truths, scores)
+
+            auc_value = auc(fpr, tpr)
+            ax.plot(fpr, tpr, marker = marker, linestyle = linestyle, color = color, label = label, alpha = 0.5)
+
+            print 'LABEL: %s' % label
+            print 'PATTERN_F:'
+            import python_utils.python_utils.utils as utils
+            import json
+            print utils.json_shortener(json.dumps(utils.get_for_json(F), indent=4))
+
+    ax.legend(prop={'size':8})
+
+    ax.set_xlabel('fpr')
+    ax.set_ylabel('tpr')
+
+    return fig
 
 def map_with_args(map_f, iterable):
     return [(item, map_f) for item in iterable]
@@ -1401,8 +1982,8 @@ def apply(x, f):
 
 def parallel_get_posterior_f(mapper, get_posterior_fs, data):
     posteriors = mapper(functools.partial(apply, data), get_posterior_fs)
-    permuted, unpermuted = zip(*posteriors)
-    return merge_pystan_permuted_traces(permuted), list(itertools.chain(*unpermuted))
+    permuted, unpermuted, descs = zip(*posteriors)
+    return merge_pystan_permuted_traces(permuted), merge_pystan_unpermuted_traces(unpermuted), iter(descs).next()
 
 
 class remapped_kwargs_f(object):
@@ -1417,6 +1998,99 @@ class remapped_kwargs_f(object):
     def __call__(self, *args, **kwargs):
         return self.f(*args, **dict([(self.keyword_map[key], val) for key in kwargs]))
     
+
+def plot_dataframe_value_counts(df):
+    figs = []
+    for name, col in df:
+        fig, ax = plt.subplots()
+        counts = col.value_counts()
+        plot_bar_chart(ax, counts.index, counts)
+        fig.suptitle(name)
+        figs.append(fig)
+    return figs
+        
+
+class get_predictor_F(F):
+    """
+    takes in data, returns a predictor
+    """
+    def __call__(self, train_data):
+        raise NotImplementedError
+
+
+class trivial_get_predictor_F(F):
+
+    def __init__(self, predictor_F):
+        self.predictor_F = predictor_F
+
+    def __call__(self, train_data):
+        return self.predictor_F
+
+
+class returns_argument_too_F(F):
+
+    def __init__(self, F):
+        self.F = F
+
+    def __call__(self, x):
+        return self.F(x), x
+
+
+
+def asdf(f):
+
+    def wrapped_f(x):
+        return f(x), x
+
+
+class in_sample_performance_get_predictor_F(F):
+    """
+    accepts a list of get_predictor_Fs.  trains all of them on the data.  then makes predictions on the data, and returns the one with best prediction according to metric function
+    """
+
+    def __init__(self, get_predictor_Fs, metric_F, mapper = map):
+        self.get_predictor_Fs, self.metric_F = get_predictor_Fs, metric_F
+        self.mapper = map
+
+    def __call__(self, train_data):
+        results = []
+        import functools
+        get_predictor_F_partials = [functools.partial(get_predictor_F, train_data) for get_predictor_F in self.get_predictor_Fs]
+        predictor_Fs = [returns_argument_too_F(F) for F in self.mapper(apply, get_predictor_F_partials)]
+        predictions_and_predictor_Fs = self.mapper(apply, [functools.partial(predictor_F, train_data) for predictor_F in predictor_Fs])
+        best_val, best_predictor_F = max([(self.metric_F(prediction), predictor_F) for (prediction, predictor_F) in predictions_and_predictor_Fs], key = lambda (val, predictor): val)
+        return best_predictor_F
+
+
+class get_cv_results_F(F):
+
+    def __init__(self, cv_F, get_predictor_F, mapper = map):
+        self.cv_F, self.get_predictor_F, self.mapper, = cv_F, get_predictor_F, mapper
+
+    def __call__(self, data):
+        results = []
+        for (train_data, test_data) in self.cv_F(data):
+            predictor_F = self.get_predictor_F(train_data)
+            results = predictor_F(test_data)
+            results.append([results, predictor_F])
+        return results
+
+
+
+class return_whats_given_F(F):
+
+    def __init__(self, x):
+        self.x = x
+
+    def __call__(self, x):
+        return self.x
+
+
+def get_cdf_xy(vals):
+    xs = sorted(vals)
+    ys = np.linspace(0, 1, len(vals))
+    return xs, ys
+
 
 
 #################
